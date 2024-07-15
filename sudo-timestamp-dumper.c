@@ -98,14 +98,25 @@ static void print_usage(void) {
 }
 
 static bool check_access(const char *path) {
+    if (!path) {
+        fprintf(stderr, "check_access(): path is NULL!\n");
+        return false;
+    }
+    const size_t path_len = strlen(path);
+    if (!path_len) {
+        fprintf(stderr, "check_access(): path is empty string!\n");
+        return false;
+    }
+    const bool is_abs = path[0] == '/';
     errno             = 0;
-    const int root_fd = open("/", O_SEARCH);
-    if (root_fd < 0) {
+    const int root_fd = is_abs ? open("/", O_SEARCH) : -1;
+    if (is_abs && root_fd < 0) {
         fprintf(stderr, "Can't open a file descriptor to \"/\"! errno => %d a.k.a. \"%s\"\n", errno,
                 strerror(errno));
+        return false;
     }
     errno         = 0;
-    const int res = faccessat(root_fd, path, R_OK, AT_EACCESS);
+    const int res = faccessat(is_abs ? root_fd : AT_FDCWD, path, R_OK, AT_EACCESS);
     if (res) {
         fprintf(stderr, "Can't read path \"%s\". errno => %d a.k.a. \"%s\"\n", path, errno,
                 strerror(errno));
