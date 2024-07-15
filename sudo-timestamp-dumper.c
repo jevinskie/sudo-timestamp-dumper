@@ -7,10 +7,44 @@
 #include <sys/fcntl.h>
 #include <sys/sysctl.h>
 #include <sys/syslimits.h>
+#include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #undef NDEBUG
 #include <assert.h>
+
+#define ARRAY_SIZE(arr) (sizeof((arr)) / sizeof(((arr))[0]))
+
+// Time stamp entry types
+#define TS_GLOBAL 0x01   // not restricted by tty or ppid
+#define TS_TTY 0x02      // restricted by tty
+#define TS_PPID 0x03     // restricted by ppid
+#define TS_LOCKEXCL 0x04 // special lock record
+// Time stamp flags
+#define TS_DISABLED 0x01 // entry disabled
+#define TS_ANYUID 0x02   // ignore uid, only valid in key
+
+struct timestamp_entry_header {
+    uint16_t version; // version number
+    uint16_t size;    // entry size
+};
+typedef struct timestamp_entry_header timestamp_entry_header_t;
+
+struct timestamp_entry_v2 {
+    timestamp_entry_header_t header; // version agnostic header
+    uint16_t type;                   // TS_GLOBAL, TS_TTY, TS_PPID
+    uint16_t flags;                  // TS_DISABLED, TS_ANYUID
+    uid_t auth_uid;                  // uid to authenticate as
+    pid_t sid;                       // session ID associated with tty/ppid
+    struct timespec start_time;      // session/ppid start time
+    struct timespec ts;              // time stamp (CLOCK_MONOTONIC)
+    union {
+        dev_t ttydev; // tty device number
+        pid_t ppid;   // parent pid
+    } u;
+};
+typedef struct timestamp_entry_v2 timestamp_entry_v2_t;
 
 static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
     const int ret_base = 8;
@@ -162,10 +196,10 @@ static bool get_sudo_uid(uid_t *puid) {
         errno                  = 0;
         unsigned long int uidl = strtoul(uid_str, &eptr, 10);
         if (errno) {
-            fprintf(
-                stderr,
-                "get_sudo_uid(): strtoul() of SUDO_UID=%s failed with errno => %d a.k.a. \"%s\"",
-                uid_str, errno, strerror(errno));
+            fprintf(stderr,
+                    "get_sudo_uid(): strtoul() of SUDO_UID=%s failed with errno => %d a.k.a. "
+                    "\"%s\"",
+                    uid_str, errno, strerror(errno));
             return false;
         }
         if (uidl > UID_MAX) {
@@ -208,6 +242,131 @@ static bool get_sudo_gid(gid_t *pgid) {
         return true;
     }
     return false;
+}
+
+static void dump_timespec(const uint8_t *ts_buf, const size_t ts_buf_sz) {
+    static const uint16_t v2_types[]    = {TS_GLOBAL, TS_TTY, TS_PPID, TS_LOCKEXCL};
+    static const char *v2_type_names[]  = {"TS_GLOBAL", "TS_TTY", "TS_PPID", "TS_LOCKEXCL"};
+    static const uint16_t v2_flags[]    = {TS_DISABLED, TS_ANYUID};
+    static const char *v2_flag_names[]  = {"TS_DISABLED", "TS_ANYUID"};
+    static uint16_t known_flags_bitmask = 0;
+    if (!known_flags_bitmask) {
+        for (size_t j = 0; j < ARRAY_SIZE(v2_flags); ++j) {
+            known_flags_bitmask |= v2_flags[j];
+        }
+    }
+    static size_t max_known_flag_idx = 0;
+    if (!max_known_flag_idx) {
+        max_known_flag_idx =
+            sizeof(unsigned int) * CHAR_BIT - __builtin_clz(known_flags_bitmask) - 1;
+    }
+
+    size_t i                                   = 0;
+    const timestamp_entry_header_t *const ehdr = (timestamp_entry_header_t *)(ts_buf + ts_buf_sz);
+    for (const timestamp_entry_header_t *hdr = (timestamp_entry_header_t *)ts_buf; hdr < ehdr;
+         hdr = (timestamp_entry_header_t *)((uintptr_t)hdr + hdr->size)) {
+        printf("ts_entry[%3zu].version    => %hu\n", i, hdr->version);
+        printf("ts_entry[%3zu].size       => 0x%hx\n", i, hdr->size);
+        if (hdr->version == 2) {
+            if (hdr->size != sizeof(timestamp_entry_v2_t)) {
+                printf("ts_entry[%3zu] version 2 has bad header size 0x%hx, expected 0x%zx. "
+                       "Skipping.\n",
+                       i, hdr->size, sizeof(timestamp_entry_v2_t));
+                continue;
+            }
+            const timestamp_entry_v2_t *tse = (timestamp_entry_v2_t *)hdr;
+
+            const char *type_name = NULL;
+            for (size_t j = 0; j < ARRAY_SIZE(v2_types); ++j) {
+                if (tse->type == v2_types[j]) {
+                    type_name = v2_type_names[j];
+                    break;
+                }
+            }
+            if (!type_name) {
+                type_name = "UNKNOWN";
+            }
+            printf("ts_entry[%3zu].type       => %s (0x%hx)\n", i, type_name, tse->type);
+
+            char flags_str[24]  = {'\0'};
+            size_t max_flag_idx = 0;
+            if (tse->flags) {
+                max_flag_idx = sizeof(unsigned int) * CHAR_BIT - __builtin_clz(tse->flags) - 1;
+            }
+            const size_t flag_space_idx =
+                max_known_flag_idx > max_flag_idx ? max_flag_idx : max_known_flag_idx;
+            for (size_t j = 0; j < ARRAY_SIZE(v2_flags); ++j) {
+                if (tse->flags & v2_flags[j]) {
+                    strncat(flags_str, v2_flag_names[j], sizeof(flags_str) - 1 - strlen(flags_str));
+                    if (j == flag_space_idx) {
+                        strncat(flags_str, " ", sizeof(flags_str) - 1 - strlen(flags_str));
+                    } else {
+                        strncat(flags_str, ", ", sizeof(flags_str) - 1 - strlen(flags_str));
+                    }
+                }
+            }
+            const char *unknown_flags =
+                (tse->flags & (uint16_t)~known_flags_bitmask) ? " (unknown flags detected)" : "";
+            printf("ts_entry[%3zu].flags      => %s(0x%hx)%s\n", i, flags_str, tse->flags,
+                   unknown_flags);
+
+            printf("ts_entry[%3zu].auth_uid   => %u\n", i, tse->auth_uid);
+
+            printf("ts_entry[%3zu].sid        => %d\n", i, tse->sid);
+
+            struct tm stm      = {0};
+            char tstr_buf[128] = {'\0'};
+            errno              = 0;
+            struct tm *rtm     = localtime_r(&tse->start_time.tv_sec, &stm);
+            if (!rtm || errno) {
+                fprintf(stderr,
+                        "ts_entry[%3zu]: Couldn't convert start_time.tv_sec (%ld) to tm using "
+                        "localtime_r. errno: %d a.k.a. \"%s\"\n",
+                        i, tse->start_time.tv_sec, errno, strerror(errno));
+            } else {
+                errno              = 0;
+                const size_t st_sz = strftime(tstr_buf, sizeof(tstr_buf) - 1, "%c", rtm);
+                if (errno) {
+                    fprintf(stderr,
+                            "ts_entry[%3zu]: Couldn't strftime start_time.tv_sec (%ld). errno: %d "
+                            "a.k.a. \"%s\"\n",
+                            i, tse->start_time.tv_sec, errno, strerror(errno));
+                }
+                printf("ts_entry[%3zu].start_time => %s\n", i, tstr_buf);
+            }
+            errno = 0;
+            memset(&stm, 0, sizeof(stm));
+            rtm = NULL;
+            rtm = localtime_r(&tse->ts.tv_sec, &stm);
+            if (!rtm || errno) {
+                fprintf(stderr,
+                        "ts_entry[%3zu]: Couldn't convert ts.tv_sec (%ld) to tm using localtime_r. "
+                        "errno: %d a.k.a. \"%s\"\n",
+                        i, tse->ts.tv_sec, errno, strerror(errno));
+            } else {
+                memset(tstr_buf, '\0', sizeof(tstr_buf));
+                errno              = 0;
+                const size_t st_sz = strftime(tstr_buf, sizeof(tstr_buf) - 1, "%c", rtm);
+                if (errno) {
+                    fprintf(stderr,
+                            "ts_entry[%3zu]: Couldn't strftime ts.tv_sec (%ld). errno: %d a.k.a. "
+                            "\"%s\"\n",
+                            i, tse->ts.tv_sec, errno, strerror(errno));
+                }
+                printf("ts_entry[%3zu].ts         => %s\n", i, tstr_buf);
+            }
+
+            if (tse->type == TS_TTY) {
+                printf("ts_entry[%3zu].ttydev     => 0x08%x\n", i, tse->u.ttydev);
+            } else if (tse->type == TS_PPID) {
+                printf("ts_entry[%3zu].ppid       => %d\n", i, tse->u.ppid);
+            }
+        }
+        if ((timestamp_entry_header_t *)((uintptr_t)hdr + hdr->size) < ehdr) {
+            puts("");
+        }
+        ++i;
+    }
 }
 
 static void print_usage(void) {
@@ -334,6 +493,8 @@ int main(int argc, const char *argv[], const char *envp[]) {
     printf("dropped geteuid() => %5u\n", dropped_euid);
     printf("dropped getgid()  => %5u\n", dropped_gid);
     printf("dropped getegid() => %5u\n", dropped_egid);
+
+    dump_timespec(ts_buf, ts_buf_sz);
 
     free((uint8_t *)ts_buf);
     // dump_env(envp);
