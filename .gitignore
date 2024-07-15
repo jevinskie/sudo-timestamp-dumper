@@ -1,0 +1,4 @@
+**/.vscode/
+**/.vscode-ctags
+**/*.dSYM/
+sudo-timestamp-dumper
