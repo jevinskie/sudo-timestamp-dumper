@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/fcntl.h>
 #include <sys/sysctl.h>
 #include <sys/syslimits.h>
 #include <unistd.h>
@@ -12,14 +13,15 @@
 #include <assert.h>
 
 static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
+    const int ret_base = 8;
     if (!path) {
         fprintf(stderr, "slurp_file provided with NULL path. WTF am I supposed to open!?\n");
-        exit(2);
+        exit(ret_base + 1);
     }
     if (!sz_ptr) {
         fprintf(stderr,
                 "slurp_file provided with NULL sz_ptr. You really probably want the size...\n");
-        exit(3);
+        exit(ret_base + 2);
     }
     errno    = 0;
     FILE *fh = fopen(path, "rb");
@@ -27,7 +29,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
         const int fopen_errno = errno;
         fprintf(stderr, "Couldn't open '%s' for slurping. errno: %d a.k.a. %s\n", path, fopen_errno,
                 strerror(fopen_errno));
-        exit(4);
+        exit(ret_base + 3);
     }
     errno                   = 0;
     const int fseek_end_res = fseek(fh, 0, SEEK_END);
@@ -35,7 +37,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
         const int fseek_end_errno = errno;
         fprintf(stderr, "Couldn't seek to end of '%s' for slurping. errno: %d a.k.a. %s\n", path,
                 fseek_end_errno, strerror(fseek_end_errno));
-        exit(5);
+        exit(ret_base + 4);
     }
     errno                = 0;
     const long ftell_res = ftell(fh);
@@ -43,7 +45,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
         const int ftell_errno = errno;
         fprintf(stderr, "Couldn't ftell on '%s' for slurping. errno: %d a.k.a. %s\n", path,
                 ftell_errno, strerror(ftell_errno));
-        exit(6);
+        exit(ret_base + 5);
     }
     errno = 0;
     rewind(fh);
@@ -51,7 +53,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
     if (rewind_errno) {
         fprintf(stderr, "Couldn't rewind on '%s' for slurping. errno: %d a.k.a. %s\n", path,
                 rewind_errno, strerror(rewind_errno));
-        exit(7);
+        exit(ret_base + 6);
     }
     const size_t sz = (size_t)ftell_res;
     errno           = 0;
@@ -61,7 +63,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
         fprintf(stderr,
                 "Couldn't malloc buffer of size %zu for '%s' for slurping. errno: %d a.k.a. %s\n",
                 sz, path, malloc_errno, strerror(malloc_errno));
-        exit(8);
+        exit(ret_base + 7);
     }
     errno                  = 0;
     const size_t fread_res = fread(buf, sz, 1, fh);
@@ -74,7 +76,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
                 "a.k.a. %s\n",
                 sz, path, feof_str, ferror_str, fread_errno, strerror(fread_errno));
         free(buf);
-        exit(9);
+        exit(ret_base + 8);
     }
     errno                = 0;
     const int fclose_res = fclose(fh);
@@ -85,7 +87,7 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
                 "Couldn't fclose(fh) of '%s' for slurping!? fclose res: %s errno: %d a.k.a. %s\n",
                 path, fclose_str, fclose_errno, strerror(fclose_errno));
         free(buf);
-        exit(10);
+        exit(ret_base + 9);
     }
     *sz_ptr = sz;
     return buf;
@@ -96,9 +98,20 @@ static void print_usage(void) {
 }
 
 static bool check_access(const char *path) {
+    errno             = 0;
+    const int root_fd = open("/", O_SEARCH);
+    if (root_fd < 0) {
+        fprintf(stderr, "Can't open a file descriptor to \"/\"! errno => %d a.k.a. \"%s\"\n", errno,
+                strerror(errno));
+    }
     errno         = 0;
-    const int res = access(path, R_OK);
-    return false;
+    const int res = faccessat(root_fd, path, R_OK, AT_EACCESS);
+    if (res) {
+        fprintf(stderr, "Can't read path \"%s\". errno => %d a.k.a. \"%s\"\n", path, errno,
+                strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 static struct kinfo_proc *get_kinfo_proc(void) {
@@ -142,13 +155,15 @@ static bool get_sudo_uid(uid_t *puid) {
         errno                  = 0;
         unsigned long int uidl = strtoul(uid_str, &eptr, 10);
         if (errno) {
-            fprintf(stderr, "get_sudo_uid(): strtoul() of SUDO_UID=%s failed with \"%s\"", uid_str,
-                    strerror(errno));
+            fprintf(
+                stderr,
+                "get_sudo_uid(): strtoul() of SUDO_UID=%s failed with errno => %d a.k.a. \"%s\"",
+                uid_str, errno, strerror(errno));
             return false;
         }
         if (uidl > UID_MAX) {
-            fprintf(stderr, "get_sudo_uid(): SUDO_UID=%s is greater than UID_MAX (a.k.a.) %lu",
-                    uid_str, UID_MAX);
+            fprintf(stderr, "get_sudo_uid(): SUDO_UID=%s is greater than UID_MAX a.k.a. %lu",
+                    uid_str, (unsigned long int)UID_MAX);
             return false;
         }
         if (!puid) {
@@ -168,13 +183,14 @@ static bool get_sudo_gid(gid_t *pgid) {
         errno                  = 0;
         unsigned long int gidl = strtoul(gid_str, &eptr, 10);
         if (errno) {
-            fprintf(stderr, "get_sudo_gid(): strtoul() of SUDO_GID=%s failed with \"%s\"", gid_str,
-                    strerror(errno));
+            fprintf(stderr,
+                    "get_sudo_gid(): strtoul() of SUDO_GID=%s failed with errno => %d \"%s\"",
+                    gid_str, errno, strerror(errno));
             return false;
         }
         if (gidl > GID_MAX) {
-            fprintf(stderr, "get_sudo_gid(): SUDO_GID=%s is greater than GID_MAX (a.k.a.) %lu",
-                    gid_str, GID_MAX);
+            fprintf(stderr, "get_sudo_gid(): SUDO_GID=%s is greater than GID_MAX a.k.a. %lu",
+                    gid_str, (unsigned long int)GID_MAX);
             return false;
         }
         if (!pgid) {
@@ -192,9 +208,14 @@ int main(int argc, const char *argv[], const char *envp[]) {
         print_usage();
         return 1;
     }
+    const char *const ts_db_path = argv[1];
 
     uid_t sudo_uid    = UID_MAX;
     gid_t sudo_gid    = GID_MAX;
+    const uid_t uid   = getuid();
+    const uid_t euid  = geteuid();
+    const gid_t gid   = getgid();
+    const gid_t egid  = getegid();
     bool has_sudo_uid = false;
     bool has_sudo_gid = false;
 
@@ -208,15 +229,102 @@ int main(int argc, const char *argv[], const char *envp[]) {
     } else {
         printf("get_sudo_gid() => %5s\n", "n/a");
     }
-    printf("getuid()       => %5u\n", getuid());
-    printf("geteuid()      => %5u\n", geteuid());
-    printf("getgid()       => %5u\n", getgid());
-    printf("getegid()      => %5u\n", getegid());
+    printf("getuid()       => %5u\n", uid);
+    printf("geteuid()      => %5u\n", euid);
+    printf("getgid()       => %5u\n", gid);
+    printf("getegid()      => %5u\n", egid);
     printf("getpgid()      => %5u\n", getpgid(getpid()));
     printf("getsid()       => %5u\n", getsid(getpid()));
 
     dump_kinfo_proc();
 
+    bool can_read = check_access(ts_db_path);
+
+    printf("check_access(): %s\n", can_read ? "YES" : "NO");
+    if (!can_read) {
+        fprintf(stderr, "Aborting because the timestamp DB at \"%s\" can't be read!\n", ts_db_path);
+        return 2;
+    }
+
+    size_t ts_buf_sz      = SIZE_T_MAX;
+    const uint8_t *ts_buf = slurp_file(ts_db_path, &ts_buf_sz);
+    if (!ts_buf || ts_buf_sz == SIZE_T_MAX) {
+        fprintf(stderr, "Aborting because the timestamp DB at \"%s\" couldn't be slurped!\n",
+                ts_db_path);
+        return 3;
+    }
+    printf("ts_db_sz: %zu\n", ts_buf_sz);
+
+    // drop privs now that the buffer is read
+    uid_t max_uid = 0;
+    if (has_sudo_uid && sudo_uid > max_uid) {
+        max_uid = sudo_uid;
+    }
+    if (uid > max_uid) {
+        max_uid = uid;
+    }
+
+    gid_t max_gid = 0;
+    if (has_sudo_gid && sudo_gid > max_gid) {
+        max_gid = sudo_gid;
+    }
+    if (gid > max_gid) {
+        max_gid = gid;
+    }
+
+    printf("max_uid => %5u\n", max_uid);
+    printf("max_gid => %5u\n", max_gid);
+
+    assert(max_uid >= uid);
+    assert(max_uid >= euid);
+    assert(max_gid >= gid);
+    assert(max_gid >= egid);
+
+    errno                 = 0;
+    const int set_gid_res = setgid(max_gid);
+    if (set_gid_res) {
+        fprintf(stderr,
+                "Aborting - failed to drop privileges with setgid(%u). errno => %d a.k.a \"%s\"\n",
+                max_gid, errno, strerror(errno));
+        return 5;
+    }
+    errno                  = 0;
+    const int set_egid_res = setegid(max_gid);
+    if (set_egid_res) {
+        fprintf(stderr,
+                "Aborting - failed to drop privileges with setegid(%u). errno => %d a.k.a \"%s\"\n",
+                max_gid, errno, strerror(errno));
+        return 6;
+    }
+
+    errno                 = 0;
+    const int set_uid_res = setuid(max_uid);
+    if (set_uid_res) {
+        fprintf(stderr,
+                "Aborting - failed to drop privileges with setuid(%u). errno => %d a.k.a \"%s\"\n",
+                max_uid, errno, strerror(errno));
+        return 7;
+    }
+    errno                  = 0;
+    const int set_euid_res = seteuid(max_uid);
+    if (set_euid_res) {
+        fprintf(stderr,
+                "Aborting - failed to drop privileges with seteuid(%u). errno => %d a.k.a \"%s\"\n",
+                max_uid, errno, strerror(errno));
+        return 8;
+    }
+
+    const uid_t dropped_uid  = getuid();
+    const uid_t dropped_euid = geteuid();
+    const gid_t dropped_gid  = getgid();
+    const gid_t dropped_egid = getegid();
+
+    printf("dropped getuid()  => %5u\n", dropped_uid);
+    printf("dropped geteuid() => %5u\n", dropped_euid);
+    printf("dropped getgid()  => %5u\n", dropped_gid);
+    printf("dropped getegid() => %5u\n", dropped_egid);
+
+    free((uint8_t *)ts_buf);
     // dump_env(envp);
 
     return 0;
