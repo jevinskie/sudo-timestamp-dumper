@@ -93,10 +93,6 @@ static uint8_t *slurp_file(const char *path, size_t *sz_ptr) {
     return buf;
 }
 
-static void print_usage(void) {
-    printf("Usage: %s <sudo timestamp DB file>\n", getprogname());
-}
-
 static bool check_access(const char *path) {
     if (!path) {
         fprintf(stderr, "check_access(): path is NULL!\n");
@@ -212,6 +208,10 @@ static bool get_sudo_gid(gid_t *pgid) {
         return true;
     }
     return false;
+}
+
+static void print_usage(void) {
+    printf("Usage: %s <sudo timestamp DB file>\n", getprogname());
 }
 
 int main(int argc, const char *argv[], const char *envp[]) {
