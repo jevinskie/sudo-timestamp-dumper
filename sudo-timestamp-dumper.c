@@ -155,40 +155,6 @@ static bool check_access(const char *path) {
     return true;
 }
 
-static struct kinfo_proc *get_kinfo_proc(void) {
-    pid_t pid                = getpid();
-    struct kinfo_proc *kinfo = malloc(sizeof(struct kinfo_proc));
-    int mib[]                = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
-    size_t len               = sizeof(struct kinfo_proc);
-    if (sysctl(mib, sizeof(mib) / sizeof(mib[0]), kinfo, &len, NULL, 0) != 0) {
-        free(kinfo);
-        fprintf(stderr, "Could not get kinfo_proc for self pid %d\n", (int)pid);
-        return NULL;
-    }
-    return kinfo;
-}
-
-static void dump_kinfo_proc(void) {
-    struct kinfo_proc *ki = get_kinfo_proc();
-    if (!ki) {
-        return;
-    }
-    printf("p_comm: \"%.*s\"\n", (int)sizeof(ki->kp_proc.p_comm), ki->kp_proc.p_comm);
-    printf("e_paddr: %p\n", (void *)ki->kp_eproc.e_paddr);
-    printf("e_sess: %p\n", (void *)ki->kp_eproc.e_sess);
-    printf("e_pcred: p_refcnt: %d p_rgid: %d p_ruid: %d p_svgid: %d p_svuid: %d pc_ucred: %p\n",
-           ki->kp_eproc.e_pcred.p_refcnt, ki->kp_eproc.e_pcred.p_rgid, ki->kp_eproc.e_pcred.p_ruid,
-           ki->kp_eproc.e_pcred.p_svgid, ki->kp_eproc.e_pcred.p_svuid,
-           (void *)ki->kp_eproc.e_pcred.pc_ucred);
-    free(ki);
-}
-
-static void dump_env(const char *envp[]) {
-    for (int i = 0; envp[i]; ++i) {
-        printf("env[%3d]: %s\n", i, envp[i]);
-    }
-}
-
 static bool get_sudo_uid(uid_t *puid) {
     const char *uid_str = NULL;
     if ((uid_str = getenv("SUDO_UID"))) {
@@ -324,15 +290,16 @@ static void dump_timespec(const uint8_t *ts_buf, const size_t ts_buf_sz) {
                         "localtime_r. errno: %d a.k.a. \"%s\"\n",
                         i, tse->start_time.tv_sec, errno, strerror(errno));
             } else {
-                errno              = 0;
-                const size_t st_sz = strftime(tstr_buf, sizeof(tstr_buf) - 1, "%c", rtm);
+                errno = 0;
+                strftime(tstr_buf, sizeof(tstr_buf) - 1, "%c", rtm);
                 if (errno) {
                     fprintf(stderr,
                             "ts_entry[%3zu]: Couldn't strftime start_time.tv_sec (%ld). errno: %d "
                             "a.k.a. \"%s\"\n",
                             i, tse->start_time.tv_sec, errno, strerror(errno));
+                } else {
+                    printf("ts_entry[%3zu].start_time => %s\n", i, tstr_buf);
                 }
-                printf("ts_entry[%3zu].start_time => %s\n", i, tstr_buf);
             }
             errno = 0;
             memset(&stm, 0, sizeof(stm));
@@ -345,15 +312,16 @@ static void dump_timespec(const uint8_t *ts_buf, const size_t ts_buf_sz) {
                         i, tse->ts.tv_sec, errno, strerror(errno));
             } else {
                 memset(tstr_buf, '\0', sizeof(tstr_buf));
-                errno              = 0;
-                const size_t st_sz = strftime(tstr_buf, sizeof(tstr_buf) - 1, "%c", rtm);
+                errno = 0;
+                strftime(tstr_buf, sizeof(tstr_buf) - 1, "%c", rtm);
                 if (errno) {
                     fprintf(stderr,
                             "ts_entry[%3zu]: Couldn't strftime ts.tv_sec (%ld). errno: %d a.k.a. "
                             "\"%s\"\n",
                             i, tse->ts.tv_sec, errno, strerror(errno));
+                } else {
+                    printf("ts_entry[%3zu].ts         => %s\n", i, tstr_buf);
                 }
-                printf("ts_entry[%3zu].ts         => %s\n", i, tstr_buf);
             }
 
             if (tse->type == TS_TTY) {
@@ -373,44 +341,24 @@ static void print_usage(void) {
     printf("Usage: %s <sudo timestamp DB file>\n", getprogname());
 }
 
-int main(int argc, const char *argv[], const char *envp[]) {
+int main(int argc, const char *argv[]) {
     if (argc != 2) {
         print_usage();
         return 1;
     }
     const char *const ts_db_path = argv[1];
 
-    uid_t sudo_uid    = UID_MAX;
-    gid_t sudo_gid    = GID_MAX;
-    const uid_t uid   = getuid();
-    const uid_t euid  = geteuid();
-    const gid_t gid   = getgid();
-    const gid_t egid  = getegid();
-    bool has_sudo_uid = false;
-    bool has_sudo_gid = false;
+    uid_t sudo_uid          = UID_MAX;
+    gid_t sudo_gid          = GID_MAX;
+    const uid_t uid         = getuid();
+    const uid_t euid        = geteuid();
+    const gid_t gid         = getgid();
+    const gid_t egid        = getegid();
+    const bool has_sudo_uid = get_sudo_uid(&sudo_uid);
+    const bool has_sudo_gid = get_sudo_gid(&sudo_gid);
 
-    if ((has_sudo_uid = get_sudo_uid(&sudo_uid))) {
-        printf("get_sudo_uid() => %5u\n", sudo_uid);
-    } else {
-        printf("get_sudo_uid() => %5s\n", "n/a");
-    }
-    if ((has_sudo_gid = get_sudo_gid(&sudo_gid))) {
-        printf("get_sudo_gid() => %5u\n", sudo_gid);
-    } else {
-        printf("get_sudo_gid() => %5s\n", "n/a");
-    }
-    printf("getuid()       => %5u\n", uid);
-    printf("geteuid()      => %5u\n", euid);
-    printf("getgid()       => %5u\n", gid);
-    printf("getegid()      => %5u\n", egid);
-    printf("getpgid()      => %5u\n", getpgid(getpid()));
-    printf("getsid()       => %5u\n", getsid(getpid()));
+    const bool can_read = check_access(ts_db_path);
 
-    dump_kinfo_proc();
-
-    bool can_read = check_access(ts_db_path);
-
-    printf("check_access(): %s\n", can_read ? "YES" : "NO");
     if (!can_read) {
         fprintf(stderr, "Aborting because the timestamp DB at \"%s\" can't be read!\n", ts_db_path);
         return 2;
@@ -423,7 +371,6 @@ int main(int argc, const char *argv[], const char *envp[]) {
                 ts_db_path);
         return 3;
     }
-    printf("ts_db_sz: %zu\n", ts_buf_sz);
 
     // drop privs now that the buffer is read
     uid_t max_uid = 0;
@@ -441,9 +388,6 @@ int main(int argc, const char *argv[], const char *envp[]) {
     if (gid > max_gid) {
         max_gid = gid;
     }
-
-    printf("max_uid => %5u\n", max_uid);
-    printf("max_gid => %5u\n", max_gid);
 
     assert(max_uid >= uid);
     assert(max_uid >= euid);
@@ -484,20 +428,9 @@ int main(int argc, const char *argv[], const char *envp[]) {
         return 8;
     }
 
-    const uid_t dropped_uid  = getuid();
-    const uid_t dropped_euid = geteuid();
-    const gid_t dropped_gid  = getgid();
-    const gid_t dropped_egid = getegid();
-
-    printf("dropped getuid()  => %5u\n", dropped_uid);
-    printf("dropped geteuid() => %5u\n", dropped_euid);
-    printf("dropped getgid()  => %5u\n", dropped_gid);
-    printf("dropped getegid() => %5u\n", dropped_egid);
-
     dump_timespec(ts_buf, ts_buf_sz);
 
     free((uint8_t *)ts_buf);
-    // dump_env(envp);
 
     return 0;
 }
