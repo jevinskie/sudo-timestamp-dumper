@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/sysctl.h>
+#include <sys/syslimits.h>
 #include <unistd.h>
 
 #undef NDEBUG
@@ -128,21 +129,95 @@ static void dump_kinfo_proc(void) {
     free(ki);
 }
 
-int main(int argc, const char *argv[]) {
+static void dump_env(const char *envp[]) {
+    for (int i = 0; envp[i]; ++i) {
+        printf("env[%3d]: %s\n", i, envp[i]);
+    }
+}
+
+static bool get_sudo_uid(uid_t *puid) {
+    const char *uid_str = NULL;
+    if ((uid_str = getenv("SUDO_UID"))) {
+        char *eptr             = NULL;
+        errno                  = 0;
+        unsigned long int uidl = strtoul(uid_str, &eptr, 10);
+        if (errno) {
+            fprintf(stderr, "get_sudo_uid(): strtoul() of SUDO_UID=%s failed with \"%s\"", uid_str,
+                    strerror(errno));
+            return false;
+        }
+        if (uidl > UID_MAX) {
+            fprintf(stderr, "get_sudo_uid(): SUDO_UID=%s is greater than UID_MAX (a.k.a.) %lu",
+                    uid_str, UID_MAX);
+            return false;
+        }
+        if (!puid) {
+            fprintf(stderr, "get_sudo_uid(): uid_t *puid is NULL!\n");
+            return false;
+        }
+        *puid = (uid_t)uidl;
+        return true;
+    }
+    return false;
+}
+
+static bool get_sudo_gid(gid_t *pgid) {
+    const char *gid_str = NULL;
+    if ((gid_str = getenv("SUDO_GID"))) {
+        char *eptr             = NULL;
+        errno                  = 0;
+        unsigned long int gidl = strtoul(gid_str, &eptr, 10);
+        if (errno) {
+            fprintf(stderr, "get_sudo_gid(): strtoul() of SUDO_GID=%s failed with \"%s\"", gid_str,
+                    strerror(errno));
+            return false;
+        }
+        if (gidl > GID_MAX) {
+            fprintf(stderr, "get_sudo_gid(): SUDO_GID=%s is greater than GID_MAX (a.k.a.) %lu",
+                    gid_str, GID_MAX);
+            return false;
+        }
+        if (!pgid) {
+            fprintf(stderr, "get_sudo_gid(): gid_t *pgid is NULL!\n");
+            return false;
+        }
+        *pgid = (gid_t)gidl;
+        return true;
+    }
+    return false;
+}
+
+int main(int argc, const char *argv[], const char *envp[]) {
     if (argc != 2) {
         print_usage();
         return 1;
     }
 
-    printf("getuid()  => %d\n", getuid());
-    printf("geteuid() => %d\n", geteuid());
-    printf("getgid()  => %d\n", getgid());
-    printf("getegid() => %d\n", getegid());
-    printf("getpgid() => %d\n", getpgid(getpid()));
-    printf("getsid()  => %d\n", getsid(getpid()));
-    printf("gethostid() => %ld\n", gethostid());
+    uid_t sudo_uid    = UID_MAX;
+    gid_t sudo_gid    = GID_MAX;
+    bool has_sudo_uid = false;
+    bool has_sudo_gid = false;
+
+    if ((has_sudo_uid = get_sudo_uid(&sudo_uid))) {
+        printf("get_sudo_uid() => %5u\n", sudo_uid);
+    } else {
+        printf("get_sudo_uid() => %5s\n", "n/a");
+    }
+    if ((has_sudo_gid = get_sudo_gid(&sudo_gid))) {
+        printf("get_sudo_gid() => %5u\n", sudo_gid);
+    } else {
+        printf("get_sudo_gid() => %5s\n", "n/a");
+    }
+    printf("getuid()       => %5u\n", getuid());
+    printf("geteuid()      => %5u\n", geteuid());
+    printf("getgid()       => %5u\n", getgid());
+    printf("getegid()      => %5u\n", getegid());
+    printf("getpgid()      => %5u\n", getpgid(getpid()));
+    printf("getsid()       => %5u\n", getsid(getpid()));
 
     dump_kinfo_proc();
+
+    // dump_env(envp);
 
     return 0;
 }

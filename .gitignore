@@ -2,3 +2,4 @@
 **/.vscode-ctags
 **/*.dSYM/
 sudo-timestamp-dumper
+sudo-timestamp-dumper-suid
